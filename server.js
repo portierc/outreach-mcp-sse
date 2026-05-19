@@ -152,7 +152,7 @@ function createMcpServer() {
       title: z.string().optional().describe('Job title'),
       company: z.string().optional().describe('Company name'),
       tags: z.array(z.string()).optional().describe('Tags to apply'),
-      customFields: z.record(z.any()).optional().describe('Custom field values (e.g., {"custom1": "value"})'),
+      customFields: z.record(z.any()).optional().describe('Custom field values — maps to Outreach {{variable N}} placeholders (e.g., {"custom1": "value", "custom34": "personalized text"})'),
     },
     async ({ emails, firstName, lastName, title, company, tags, customFields }) => {
       const attributes = { emails };
@@ -242,6 +242,29 @@ function createMcpServer() {
         body: JSON.stringify(body),
       });
       return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+    }
+  );
+
+  // Check if Prospect is in a Sequence
+  server.tool(
+    'check_prospect_in_sequence',
+    'Check if a prospect is already enrolled in a specific sequence (or any sequence)',
+    {
+      prospectId: z.number().describe('Prospect ID'),
+      sequenceId: z.number().optional().describe('Sequence ID (omit to check all sequences)'),
+    },
+    async ({ prospectId, sequenceId }) => {
+      const params = new URLSearchParams();
+      params.set('filter[prospect][id]', String(prospectId));
+      if (sequenceId) {
+        params.set('filter[sequence][id]', String(sequenceId));
+      }
+      const result = await outreachFetch(`/sequenceStates?${params.toString()}`);
+      const states = result.data || [];
+      if (states.length === 0) {
+        return { content: [{ type: 'text', text: JSON.stringify({ enrolled: false, message: 'Prospect is not in this sequence' }, null, 2) }] };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ enrolled: true, sequenceStates: states }, null, 2) }] };
     }
   );
 
