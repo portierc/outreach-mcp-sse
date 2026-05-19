@@ -39,14 +39,82 @@ function authenticateRequest(req, res, next) {
 // Outreach API client
 const OUTREACH_BASE_URL = 'https://api.outreach.io/api/v2';
 let accessToken = process.env.OUTREACH_ACCESS_TOKEN;
-const refreshToken = process.env.OUTREACH_REFRESH_TOKEN;
+let refreshToken = process.env.OUTREACH_REFRESH_TOKEN;
 const clientId = process.env.OUTREACH_CLIENT_ID;
 const clientSecret = process.env.OUTREACH_CLIENT_SECRET;
-const redirectUri = process.env.OUTREACH_REDIRECT_URI || 'https://localhost/callback';
+const SCOPES = 'prospects.all sequenceStates.all sequences.read templates.all sequenceSteps.all';
+
+// Redirect URI is auto-detected from the running server URL
+function getRedirectUri(req) {
+  if (process.env.OUTREACH_REDIRECT_URI) return process.env.OUTREACH_REDIRECT_URI;
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}/oauth/callback`;
+}
+
+// --- OAuth Routes ---
+
+// Step 1: Visit this to start the OAuth flow
+app.get('/oauth/authorize', (req, res) => {
+  if (!clientId) {
+    return res.status(500).json({ error: 'OUTREACH_CLIENT_ID env var not set' });
+  }
+  const redirect = getRedirectUri(req);
+  const url = `https://api.outreach.io/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirect)}&response_type=code&scope=${encodeURIComponent(SCOPES)}`;
+  res.redirect(url);
+});
+
+// Step 2: Outreach redirects here with the code — we exchange it for tokens
+app.get('/oauth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) {
+    return res.status(400).json({ error: 'Missing authorization code' });
+  }
+  try {
+    const redirect = getRedirectUri(req);
+    const tokenRes = await fetch('https://api.outreach.io/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirect,
+      }),
+    });
+    if (!tokenRes.ok) {
+      const err = await tokenRes.text();
+      return res.status(400).json({ error: 'Token exchange failed', details: err });
+    }
+    const data = await tokenRes.json();
+    accessToken = data.access_token;
+    refreshToken = data.refresh_token;
+
+    res.json({
+      status: 'ok',
+      message: 'Outreach connected! Tokens are active in memory. Set these as Railway env vars for persistence:',
+      OUTREACH_ACCESS_TOKEN: data.access_token,
+      OUTREACH_REFRESH_TOKEN: data.refresh_token,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Check current auth status
+app.get('/oauth/status', (req, res) => {
+  res.json({
+    hasAccessToken: !!accessToken,
+    hasRefreshToken: !!refreshToken,
+    hasClientId: !!clientId,
+    hasClientSecret: !!clientSecret,
+  });
+});
 
 async function refreshAccessToken() {
   if (!refreshToken || !clientId || !clientSecret) {
-    throw new Error('Cannot refresh token - missing OUTREACH_REFRESH_TOKEN, OUTREACH_CLIENT_ID, or OUTREACH_CLIENT_SECRET');
+    throw new Error('Not authenticated. Visit /oauth/authorize to connect Outreach.');
   }
   const res = await fetch('https://api.outreach.io/oauth/token', {
     method: 'POST',
@@ -56,7 +124,7 @@ async function refreshAccessToken() {
       refresh_token: refreshToken,
       client_id: clientId,
       client_secret: clientSecret,
-      redirect_uri: redirectUri,
+      redirect_uri: process.env.OUTREACH_REDIRECT_URI || 'https://localhost/callback',
     }),
   });
   if (!res.ok) {
@@ -416,7 +484,13 @@ app.delete('/mcp', authenticateRequest, async (req, res) => {
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'outreach-mcp', transport: 'streamable-http' });
+  res.json({
+    status: 'ok',
+    service: 'outreach-mcp',
+    transport: 'streamable-http',
+    authenticated: !!accessToken,
+    authorize_url: '/oauth/authorize',
+  });
 });
 
 // Start server
